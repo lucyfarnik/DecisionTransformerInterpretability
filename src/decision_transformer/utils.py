@@ -303,7 +303,7 @@ def initialize_padding_inputs(
             obs_image,
         ),
         dim=1,
-    ).to(float)
+    ).to(torch.float32)
 
     reward = torch.zeros((batch_size, max_len, 1), dtype=torch.float).to(
         device
