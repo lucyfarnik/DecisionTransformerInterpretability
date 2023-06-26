@@ -8,8 +8,8 @@ import json
 import itertools
 from argparse import Namespace
 import streamlit as st
-import matplotlib.pyplot as plt
 from plotly import express as px
+import plotly.graph_objs as go
 from typing import Tuple, List, Optional, Literal, Union
 from dataclasses import dataclass
 import logging
@@ -419,19 +419,20 @@ def residual_stack_to_logit_diff(
     '''
     # SOLUTION
     batch_size = residual_stack.size(-2)
-    scaled_residual_stack = cache.apply_ln_to_stack(residual_stack, layer=-1, pos_slice=-1)
+    residual_stack = cache.apply_ln_to_stack(residual_stack, layer=-1, pos_slice=-1)
     return einops.einsum(
-        scaled_residual_stack, logit_diff_directions,
+        residual_stack, logit_diff_directions,
         "... batch d_model, d_model -> ..."
     ) / batch_size
 #%%
-def plot_attribution(should_use_bottom: bool = False, accumulated: bool = False):
+def plot_attribution(should_use_bottom: bool = False, accumulated: bool = False,
+                     logit_dir: torch.Tensor = logit_diff_dir):
     cache = bottom_cache if should_use_bottom else top_cache
     if accumulated:
         residual_stack, labels = cache.accumulated_resid(layer=-1, incl_mid=True, pos_slice=-1, return_labels=True)
     else:
         residual_stack, labels = cache.decompose_resid(layer=-1, pos_slice=-1, return_labels=True)
-    diff = residual_stack_to_logit_diff(residual_stack, cache)
+    diff = residual_stack_to_logit_diff(residual_stack, cache, logit_dir)
     if should_use_bottom: diff = -diff
     line(
         diff, 
@@ -475,6 +476,19 @@ def plot_neuron_diff(should_use_bottom: bool = False, layer: int = -1, thresh: f
 plot_neuron_diff()
 plot_neuron_diff(should_use_bottom=True)
 # %%
+# let's look into the differences between the neuron attributions when we use the top vs bottom
+top_stack, top_labels = top_cache.stack_neuron_results(layer=-1, pos_slice=-1, return_labels=True)
+bottom_stack, _ = bottom_cache.stack_neuron_results(layer=-1, pos_slice=-1, return_labels=True)
+top_stack, top_labels, bottom_stack = top_stack[-256:], top_labels[-256:], bottom_stack[-256:]
+top_diff = residual_stack_to_logit_diff(top_stack, top_cache)
+bottom_diff = residual_stack_to_logit_diff(bottom_stack, bottom_cache, -logit_diff_dir)
+diff2_by_label = dict()
+for act, label in zip(top_diff + bottom_diff, top_labels):
+    diff2_by_label[label] = act.item()
+diff2_by_label = {k: v for k, v in sorted(diff2_by_label.items(), key=lambda item: abs(item[1]), reverse=True)}
+print(diff2_by_label)
+# %%
+# takes the trajectories with the Key as the Instruction
 # changes some of the global vars, if you then re-run the cells above it'll use these values
 # (yes this is extremely cursed, yes I'm sorry)
 
@@ -491,4 +505,54 @@ plot_neuron_diff()
 plot_neuron_diff(should_use_bottom=True)
 #%%
 plot_neuron_diff(layer=1, thresh=0.2)
+# %%
+# puts the Ball as the Instruction again
+traj_pos_top = trajectory_to_decision_square(high_rtg=True, target_obj='ball', target_pos='top')
+traj_pos_bottom = trajectory_to_decision_square(high_rtg=True, target_obj='ball', target_pos='bottom')
+top_embed = embed_state(traj_pos_top)
+bottom_embed = embed_state(traj_pos_bottom)
+
+top_outs, top_cache = model.transformer.run_with_cache(top_embed)
+bottom_outs, bottom_cache = model.transformer.run_with_cache(bottom_embed)
+# %%
+print(f"When the ball is at the top, L2N132's activation is {top_cache['post', -1, 'mlp'][0, -1, 132].item():.2f}")
+print(f"When the ball is at the bottom, L2N132's activation is {bottom_cache['post', -1, 'mlp'][0, -1, 132].item():.2f}")
+# %%
+
+def plot_attribution_for_neuron_in_dir(neuron: int, layer: int = -1):
+    in_dir = model.transformer.blocks[layer].mlp.W_in[:, neuron]
+    top_stack, labels = top_cache.decompose_resid(layer=-1, pos_slice=-1, return_labels=True)
+    top_diff = residual_stack_to_logit_diff(top_stack, top_cache, in_dir).detach()
+    bottom_stack, _ = bottom_cache.decompose_resid(layer=-1, pos_slice=-1, return_labels=True)
+    bottom_diff = residual_stack_to_logit_diff(bottom_stack, bottom_cache, in_dir).detach()
+    # plot both top_diff and bottom_diff on the same plot (each is a line)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=labels, y=top_diff, name='top', line=dict(color='firebrick', width=4)))
+    fig.add_trace(go.Scatter(x=labels, y=bottom_diff, name='bottom', line=dict(color='royalblue', width=4)))
+    fig.update_layout(title=f"Logit Difference of Neuron {neuron} in MLP{layer if layer != -1 else '2'} on target_pos_top vs target_pos_bottom",
+                      yaxis_title='Logit Difference')
+    fig.show()
+# %%
+l2n132_in_dir = model.transformer.blocks[-1].mlp.W_in[:, 132]
+print(f"The cosine sim. between resid_mid[2] and L2N132's input direction when the Ball is at the top is {torch.cosine_similarity(top_cache['resid_mid', -1][0, -1], l2n132_in_dir, dim=0):.2f}")
+print(f"The cosine sim. between resid_mid[2] and L2N132's input direction when the Ball is at the bottom is {torch.cosine_similarity(bottom_cache['resid_mid', -1][0, -1], l2n132_in_dir, dim=0):.2f}")
+plot_attribution_for_neuron_in_dir(132)
+
+# %%
+plot_attribution_for_neuron_in_dir(235)
+# %%
+def plot_head_attr_for_neuron_in_dir(neuron: int, use_bottom_cache: bool = False,
+                                     neuron_layer: int = -1, attn_layer: int = -1):
+    cache = bottom_cache if use_bottom_cache else top_cache
+    in_dir = model.transformer.blocks[neuron_layer].mlp.W_in[:, neuron]
+    head_stack, labels = cache.stack_head_results(layer=attn_layer,
+                                                      pos_slice=-1, return_labels=True)
+    head_diff = residual_stack_to_logit_diff(head_stack, cache, in_dir)
+    imshow(head_diff[None, :],
+           title=f"Logit Attribution of Attn{attn_layer if attn_layer != -1 else 2}'s heads in the input direction of L{neuron_layer if neuron_layer != -1 else 2}N{neuron} (Target at the {'bottom' if use_bottom_cache else 'top'})")
+# %%
+plot_head_attr_for_neuron_in_dir(132)
+plot_head_attr_for_neuron_in_dir(132, use_bottom_cache=True)
+plot_head_attr_for_neuron_in_dir(235)
+plot_head_attr_for_neuron_in_dir(235, use_bottom_cache=True)
 # %%
