@@ -456,7 +456,8 @@ imshow(bottom_cache['post', 2, 'mlp'][0,-1].reshape(16,-1))
 def plot_neuron_diff(should_use_bottom: bool = False, layer: int = -1, thresh: float = 0.4):
     if layer < -1: raise ValueError("layer must be -1 or greater")
     cache = bottom_cache if should_use_bottom else top_cache
-    neuron_stack, labels = cache.stack_neuron_results(layer=layer+1, pos_slice=-1, return_labels=True)
+    neuron_stack, labels = cache.stack_neuron_results(layer=layer if layer == -1 else layer+1,
+                                                      pos_slice=-1, return_labels=True)
     if layer != 0:
         neuron_stack = neuron_stack[-256:]
         labels = labels[-256:]
