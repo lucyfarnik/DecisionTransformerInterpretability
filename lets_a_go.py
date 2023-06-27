@@ -9,6 +9,7 @@ import itertools
 from argparse import Namespace
 import streamlit as st
 from plotly import express as px
+from plotly.subplots import make_subplots
 import plotly.graph_objs as go
 from typing import Tuple, List, Optional, Literal, Union
 from dataclasses import dataclass
@@ -555,4 +556,179 @@ plot_head_attr_for_neuron_in_dir(132)
 plot_head_attr_for_neuron_in_dir(132, use_bottom_cache=True)
 plot_head_attr_for_neuron_in_dir(235)
 plot_head_attr_for_neuron_in_dir(235, use_bottom_cache=True)
+# %%
+get_action_prob = lambda x, action=0: next_action_logits(x).squeeze().softmax(0)[action].item()
+def model_behavior_with_mlp2_set_ablated(mlp2_neurons: List[int], resample_ablation: bool = True):
+    print(f"MLP2 neurons subset is {mlp2_neurons}")
+    print(f"(The number of neurons in the subset is {len(mlp2_neurons)})")
+    def ablate_important_neurons(activations: torch.Tensor, hook):
+        if resample_ablation:
+            activations[:, :, mlp2_neurons] = other_cache['post', -1, 'mlp'][:, :, mlp2_neurons]
+        else:
+            activations[:, :, mlp2_neurons] = 0
+        return activations
+    def ablate_nonimportant_neurons(activations: torch.Tensor, hook):
+        if resample_ablation:
+            ablated = other_cache['post', -1, 'mlp'].clone()
+        else:
+            ablated = torch.zeros_like(activations)
+        ablated[:, :, mlp2_neurons] = activations[:, :, mlp2_neurons]
+        return ablated
+
+    print("When the agent is supposed to go to the top:")
+    # clean_top_outs = model.transformer(top_embed)
+    other_cache = bottom_cache
+    only9_top_outs = model.transformer.run_with_hooks(top_embed,
+                                                    fwd_hooks=[(get_act_name('post', 2, 'mlp'),
+                                                        ablate_nonimportant_neurons)])
+    others_top_outs = model.transformer.run_with_hooks(top_embed,
+                                                        fwd_hooks=[(get_act_name('post', 2, 'mlp'),
+                                                        ablate_important_neurons)])
+
+    # print(f"Go left with no ablation: {get_action_prob(clean_top_outs):.3f}")
+    print(f"Go left with all neurons ablated except for the subset: {get_action_prob(only9_top_outs):.3f}")
+    print(f"Go left with the subset is ablated: {get_action_prob(others_top_outs):.3f}")
+
+    print("\nWhen the agent is supposed to go to the bottom:")
+    # clean_bottom_outs = model.transformer(bottom_embed)
+    other_cache = top_cache
+    only9_bottom_outs = model.transformer.run_with_hooks(bottom_embed,
+                                                    fwd_hooks=[(get_act_name('post', 2, 'mlp'),
+                                                        ablate_nonimportant_neurons)])
+    others_bottom_outs = model.transformer.run_with_hooks(bottom_embed,
+                                                        fwd_hooks=[(get_act_name('post', 2, 'mlp'),
+                                                        ablate_important_neurons)])
+    # print(f"Go right with no ablation: {get_action_prob(clean_bottom_outs, 1):.3f}")
+    print(f"Go right with neurons ablated except for the subset: {get_action_prob(only9_bottom_outs, 1):.3f}")
+    print(f"Go right with the subset is ablated: {get_action_prob(others_bottom_outs, 1):.3f}")
+    print("\n\n\n")
+# %%
+model_behavior_with_mlp2_set_ablated([79, 132, 235, 255, 1, 108, 158, 169, 204])
+# %%
+subset = []
+for neuron, diff in diff2_by_label.items():
+    subset.append(int(neuron[3:]))
+    model_behavior_with_mlp2_set_ablated(subset)
+# %%
+no_mlp2_hooks = [(get_act_name('post', 2, 'mlp'), lambda x, hook: torch.zeros_like(x))]
+no_mlp2_top_outs = model.transformer.run_with_hooks(top_embed, fwd_hooks=no_mlp2_hooks)
+no_mlp2_bottom_outs = model.transformer.run_with_hooks(bottom_embed, fwd_hooks=no_mlp2_hooks)
+print(f"Go left with no MLP2: {get_action_prob(no_mlp2_top_outs):.3f}")
+print(f"Go right with no MLP2: {get_action_prob(no_mlp2_bottom_outs, 1):.3f}")
+# %%
+top30_mlp2_neurons = [int(n[3:]) for n in list(diff2_by_label.keys())[:30]]
+print(top30_mlp2_neurons)
+# %%
+# find the neuron that is the most important out of the top 30
+for neuron in top30_mlp2_neurons:
+    model_behavior_with_mlp2_set_ablated([neuron])
+# %%
+# picked the top 4 that individually have the most impact
+current_subset = [132, 204, 1, 235]
+model_behavior_with_mlp2_set_ablated(current_subset)
+# %%
+for neuron in top30_mlp2_neurons:
+    if neuron not in current_subset:
+        model_behavior_with_mlp2_set_ablated([*current_subset, neuron])
+# %%
+current_subset = [132, 204, 1, 235, 79, 108, 169]
+model_behavior_with_mlp2_set_ablated(current_subset)
+# %%
+for neuron in top30_mlp2_neurons:
+    if neuron not in current_subset:
+        model_behavior_with_mlp2_set_ablated([*current_subset, neuron])
+# %%
+current_subset = [132, 204, 1, 235, 79, 108, 169, 255, 4, 63]
+model_behavior_with_mlp2_set_ablated(current_subset)
+#%%
+mlp2_neurons = current_subset
+#%%
+# for each neuron in the subset, calculate the cosine similarity between its output weights and the logit_diff_dir
+for neuron in mlp2_neurons:
+    print(f"{neuron:<4} {torch.cosine_similarity(model.transformer.blocks[-1].mlp.W_out[neuron], logit_diff_dir, dim=0).item()}")
+# %%
+print("Cosine similarity of all neurons in MLP2 with the logit diff direction\n\n")
+mlp2_by_cosine_w_logit_dir = dict()
+for neuron in range(256):
+    mlp2_by_cosine_w_logit_dir[neuron] = torch.cosine_similarity(model.transformer.blocks[-1].mlp.W_out[neuron], logit_diff_dir, dim=0).item()
+mlp2_by_cosine_w_logit_dir = {k: v for k, v in sorted(mlp2_by_cosine_w_logit_dir.items(), key=lambda item: abs(item[1]), reverse=True)}
+print(mlp2_by_cosine_w_logit_dir)
+# %%
+print("Behavior of the top 10 neurons by cosine similarity")
+model_behavior_with_mlp2_set_ablated([132, 204, 235, 1, 108, 227, 255, 234, 4, 106])
+# %%
+# finding attn heads that move info from Obs_0 (ie index 13) to Obs_{-1} (ie index 25)
+fig = make_subplots(rows=8, cols=3)
+fig.update_layout(height=1600)
+for layer in range(3):
+    for head in range(8):
+        fig.add_trace(
+            go.Heatmap(
+                z=top_cache['pattern', layer][0, head].detach().cpu().numpy(),
+                showscale=False,
+                colorscale='Blues',
+            ),
+            row=head+1, col=layer+1
+        )
+# Show the subplots
+fig.show()
+
+# %%
+# for each attn head, log how much info it moves from Obs_0 to Obs_{-1}
+attn_from_0_to_neg1 = dict()
+for layer in range(3):
+    for head in range(8):
+        attn_from_0_to_neg1[f'L{layer}H{head}'] = [
+            top_cache['pattern', layer][0, head, 25, 13].item(),
+            bottom_cache['pattern', layer][0, head, 25, 13].item(),
+        ]
+# print the top 10 heads by the sum of their top and bottom attn
+attn_from_0_to_neg1 = {k: v for k, v in sorted(attn_from_0_to_neg1.items(), key=lambda item: abs(item[1][0]) + abs(item[1][1]), reverse=True)}
+for k, v in attn_from_0_to_neg1.items():
+    print(f"{k}: {v}")
+# %%
+# visualize the attn patterns of the top 4 heads (L0H4, L0H0, L2H4, L1H0)
+fig = make_subplots(rows=2, cols=2, subplot_titles=("L0H4", "L0H0", "L2H4", "L1H0"))
+for i, (layer, head) in enumerate([(0,4), (0,0), (2,4), (1,0)]):
+    fig.add_trace(
+        go.Heatmap(
+            z=top_cache['pattern', layer][0, head].detach().cpu().numpy(),
+            showscale=False,
+            colorscale='Blues',
+        ),
+        row=i//2+1, col=i%2+1
+    )
+fig.show()
+# %%
+max_attn_to_0 = dict()
+for layer in range(3):
+    for head in range(8):
+        max_attn_to_0[f'L{layer}H{head}'] = max(
+            top_cache['pattern', layer][0, head, :, 13].max().item(),
+            bottom_cache['pattern', layer][0, head, :, 13].max().item(),
+        )
+# print the top 10 heads by the sum of their top and bottom attn
+max_attn_to_0 = {k: v for k, v in sorted(max_attn_to_0.items(), key=lambda item: abs(item[1]), reverse=True)}
+for k, v in max_attn_to_0.items():
+    print(f"{k}: {v}")
+# %%
+mlp2_right = [132, 204, 1, 108, 169, 63]
+mlp2_left = [235, 79, 255, 4]
+mlp2_right_in_dirs = [model.transformer.blocks[-1].mlp.W_in[:, neuron] for neuron in mlp2_right]
+mlp2_left_in_dirs = [model.transformer.blocks[-1].mlp.W_in[:, neuron] for neuron in mlp2_left]
+l1h0_out_dir_top = top_cache['result', 1, 'attn'][0, -1, 0]
+l1h0_out_dir_bottom = bottom_cache['result', 1, 'attn'][0, -1, 0]
+l2h4_out_dir_top = top_cache['result', 2, 'attn'][0, -1, 4]
+l2h4_out_dir_bottom = bottom_cache['result', 2, 'attn'][0, -1, 4]
+
+# print a table of the cosine similarities between all Left neurons and the output directions of L1H0 and L2H4
+print("Cosine similarities between Left neurons and the output directions of L1H0 and L2H4")
+print("Top cache")
+print("Neuron\tL1H0\tL2H4")
+for neuron, in_dir in zip(mlp2_left, mlp2_left_in_dirs):
+    print(f"{neuron}\t{torch.cosine_similarity(in_dir, l1h0_out_dir_top, dim=0).item():.3f}\t{torch.cosine_similarity(in_dir, l2h4_out_dir_top, dim=0).item():.3f}")
+print("\n\nBottom cache")
+print("Neuron\tL1H0\tL2H4")
+for neuron, in_dir in zip(mlp2_left, mlp2_left_in_dirs):
+    print(f"{neuron}\t{torch.cosine_similarity(in_dir, l1h0_out_dir_bottom, dim=0).item():.3f}\t{torch.cosine_similarity(in_dir, l2h4_out_dir_bottom, dim=0).item():.3f}")
 # %%
