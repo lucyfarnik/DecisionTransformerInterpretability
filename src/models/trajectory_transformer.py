@@ -277,6 +277,7 @@ class TrajectoryTransformer(nn.Module):
             d_vocab_out=self.transformer_config.d_model,
             seed=self.transformer_config.seed,
             device=self.transformer_config.device,
+            use_attn_result=True,
         )
 
         assert (

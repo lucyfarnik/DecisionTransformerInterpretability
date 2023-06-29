@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import logging
 from transformer_lens import ActivationCache
 from transformer_lens.utils import get_act_name
+from functools import partial
 
 from src.environments.registration import register_envs
 from src.config import EnvironmentConfig
@@ -731,4 +732,179 @@ print("\n\nBottom cache")
 print("Neuron\tL1H0\tL2H4")
 for neuron, in_dir in zip(mlp2_left, mlp2_left_in_dirs):
     print(f"{neuron}\t{torch.cosine_similarity(in_dir, l1h0_out_dir_bottom, dim=0).item():.3f}\t{torch.cosine_similarity(in_dir, l2h4_out_dir_bottom, dim=0).item():.3f}")
+# %%
+# neuron-level analysis of what writes into the input directions of the MLP2 neurons
+neurons_writing_into_mlp2: dict[int, dict[str, float]] = dict()
+left_neurons_in_prev_mlps: dict[str, float] = dict()
+for mlp2_n in mlp2_neurons:
+    neurons_writing_into_mlp2[mlp2_n] = dict()
+    for layer in range(2):
+        for neuron in range(256):
+            cos_sim = torch.cosine_similarity(
+                model.transformer.blocks[-1].mlp.W_in[:, mlp2_n],
+                model.transformer.blocks[layer].mlp.W_out[neuron, :],
+                dim=0,
+            ).item()
+            neurons_writing_into_mlp2[mlp2_n][f'L{layer}N{neuron}'] = cos_sim
+
+            if f'L{layer}N{neuron}' not in left_neurons_in_prev_mlps:
+                left_neurons_in_prev_mlps[f'L{layer}N{neuron}'] = 0
+            if mlp2_n in mlp2_left:
+                left_neurons_in_prev_mlps[f'L{layer}N{neuron}'] += cos_sim / len(mlp2_left)
+            else:
+                left_neurons_in_prev_mlps[f'L{layer}N{neuron}'] -= cos_sim / len(mlp2_right)
+
+# for each mlp2 neuron, sort the items in its dict by value
+for mlp2_n in mlp2_neurons:
+    neurons_writing_into_mlp2[mlp2_n] = {k: v for k, v in sorted(neurons_writing_into_mlp2[mlp2_n].items(), key=lambda item: abs(item[1]), reverse=True)}
+# print the top 10 neurons for each mlp2 neuron
+for mlp2_n in mlp2_neurons:
+    mlp2_n_bias = model.transformer.blocks[-1].mlp.b_in[mlp2_n].item()
+    print(f"MLP2 neuron {mlp2_n} ({'left' if mlp2_n in mlp2_left else 'right'}, bias: {mlp2_n_bias:.2f})")
+    for k, v in list(neurons_writing_into_mlp2[mlp2_n].items())[:10]:
+        print(f"{k}: {v}")
+    print()
+# print top 30 neurons by their absolute value in the Left-Right directions
+print("Top 30 neurons by their absolute value in the Left-Right directions")
+left_neurons_in_prev_mlps = {k: v for k, v in sorted(left_neurons_in_prev_mlps.items(), key=lambda item: abs(item[1]), reverse=True)}
+for k, v in list(left_neurons_in_prev_mlps.items())[:30]:
+    print(f"{k}: {v}")
+# %%
+# head-level analysis of what writes into the input directions of the MLP2 neurons
+heads_writing_into_mlp2_top: dict[int, dict[str, float]] = dict()
+heads_writing_into_mlp2_bottom: dict[int, dict[str, float]] = dict()
+heads_writing_in_correct_dir: dict[str, float] = dict()
+for mlp2_n in mlp2_neurons:
+    heads_writing_into_mlp2_top[mlp2_n] = dict()
+    heads_writing_into_mlp2_bottom[mlp2_n] = dict()
+    for layer in range(3):
+        for head in range(8):
+            cos_sim_top = torch.cosine_similarity(
+                model.transformer.blocks[-1].mlp.W_in[:, mlp2_n],
+                top_cache['result', layer][0, -1, head],
+                dim=0,
+            ).item()
+            heads_writing_into_mlp2_top[mlp2_n][f'L{layer}H{head}'] = cos_sim_top
+            cos_sim_bottom = torch.cosine_similarity(
+                model.transformer.blocks[-1].mlp.W_in[:, mlp2_n],
+                bottom_cache['result', layer][0, -1, head],
+                dim=0,
+            ).item()
+            heads_writing_into_mlp2_bottom[mlp2_n][f'L{layer}H{head}'] = cos_sim_bottom
+
+            if f'L{layer}H{head}' not in heads_writing_in_correct_dir:
+                heads_writing_in_correct_dir[f'L{layer}H{head}'] = 0
+            if mlp2_n in mlp2_left:
+                heads_writing_in_correct_dir[f'L{layer}H{head}'] += cos_sim_top / len(mlp2_left)
+                heads_writing_in_correct_dir[f'L{layer}H{head}'] -= cos_sim_bottom / len(mlp2_left)
+            else:
+                heads_writing_in_correct_dir[f'L{layer}H{head}'] -= cos_sim_top / len(mlp2_right)
+                heads_writing_in_correct_dir[f'L{layer}H{head}'] += cos_sim_bottom / len(mlp2_right)
+# for each mlp2 neuron, sort the items in its dict by value
+for mlp2_n in mlp2_neurons:
+    heads_writing_into_mlp2_top[mlp2_n] = {k: v for k, v in sorted(heads_writing_into_mlp2_top[mlp2_n].items(), key=lambda item: abs(item[1]), reverse=True)}
+    heads_writing_into_mlp2_bottom[mlp2_n] = {k: v for k, v in sorted(heads_writing_into_mlp2_bottom[mlp2_n].items(), key=lambda item: abs(item[1]), reverse=True)}
+# print the top 10 heads for each mlp2 neuron
+for mlp2_n in mlp2_neurons:
+    mlp2_n_bias = model.transformer.blocks[-1].mlp.b_in[mlp2_n].item()
+    print(f"MLP2 neuron {mlp2_n} ({'left' if mlp2_n in mlp2_left else 'right'}, bias: {mlp2_n_bias:.2f})")
+    print("Top cache")
+    for k, v in list(heads_writing_into_mlp2_top[mlp2_n].items())[:10]:
+        print(f"{k}: {v}")
+    print("Bottom cache")
+    for k, v in list(heads_writing_into_mlp2_bottom[mlp2_n].items())[:10]:
+        print(f"{k}: {v}")
+    print()
+# print top 10 heads by their correctness when writing into the Left-Right direction
+print("Top 10 heads by their correctness when writing into the Left-Right direction")
+heads_writing_in_correct_dir = {k: v for k, v in sorted(heads_writing_in_correct_dir.items(), key=lambda item: abs(item[1]), reverse=True)}
+for k, v in list(heads_writing_in_correct_dir.items())[:10]:
+    print(f"{k}: {v}")
+# %%
+print('Top cache')
+fig = make_subplots(rows=2, cols=2, subplot_titles=("L0H5", "L1H0", "L2H0", "L2H1"))
+for i, (layer, head) in enumerate([(0,5), (1,0), (2,4), (2,1)]):
+    fig.add_trace(
+        go.Heatmap(
+            z=top_cache['pattern', layer][0, head].detach().cpu().numpy(),
+            showscale=False,
+            colorscale='Blues',
+        ),
+        row=i//2+1, col=i%2+1
+    )
+fig.show()
+print('Bottom cache')
+fig = make_subplots(rows=2, cols=2, subplot_titles=("L0H5", "L1H0", "L2H0", "L2H1"))
+for i, (layer, head) in enumerate([(0,5), (1,0), (2,4), (2,1)]):
+    fig.add_trace(
+        go.Heatmap(
+            z=bottom_cache['pattern', layer][0, head].detach().cpu().numpy(),
+            showscale=False,
+            colorscale='Blues',
+        ),
+        row=i//2+1, col=i%2+1
+    )
+fig.show()
+# %%
+# what happens if we activation patch L1H0?
+def patch_l1h0(activation: torch.Tensor, hook, other_cache: ActivationCache):
+    activation[:, :, 0] = other_cache['result', 1, 'attn'][:, :, 0]
+    return activation
+noising_hook = partial(patch_l1h0, other_cache=bottom_cache)
+denoising_hook = partial(patch_l1h0, other_cache=top_cache)
+noised_outs = model.transformer.run_with_hooks(top_embed,
+                                               fwd_hooks=[(get_act_name('result', 1, 'attn'),
+                                                           noising_hook)])
+denoised_outs = model.transformer.run_with_hooks(bottom_embed,
+                                                 fwd_hooks=[(get_act_name('result', 1, 'attn'),
+                                                             denoising_hook)])
+print("Logits when patching (first number means left, second means right)")
+print(f"Target at top, no patching: {next_action_logits(top_outs).squeeze()[:2].detach().tolist()}")
+print(f"Target at top, patched 'target at bottom' into L1H0: {next_action_logits(noised_outs).squeeze()[:2].detach().tolist()}")
+print(f"Target at bottom, patched 'target at top' into L1H0: {next_action_logits(denoised_outs).squeeze()[:2].detach().tolist()}")
+print(f"Target at bottom, no patching: {next_action_logits(bottom_outs).squeeze()[:2].detach().tolist()}")
+
+# %%
+# what happens if we just patch all attn heads?
+def patch_layers(layers: List[int]):
+    def patch_all_heads(activation: torch.Tensor, hook, other_cache: ActivationCache):
+        return other_cache['result', hook.layer(), 'attn']
+    noising_hook = partial(patch_all_heads, other_cache=bottom_cache)
+    denoising_hook = partial(patch_all_heads, other_cache=top_cache)
+    noised_outs = model.transformer.run_with_hooks(top_embed,
+                                                    fwd_hooks=[
+                                                        (get_act_name('result', layer, 'attn'),
+                                                        noising_hook)
+                                                        for layer in layers])
+    denoised_outs = model.transformer.run_with_hooks(bottom_embed,
+                                                        fwd_hooks=[
+                                                            (get_act_name('result', layer, 'attn'),
+                                                            denoising_hook)
+                                                            for layer in layers])
+    print(f'{layers=}')
+    for outs, label in [(top_outs, 'top_outs'), (noised_outs, 'noised_outs'),
+                        (denoised_outs, 'denoised_outs'), (bottom_outs, 'bottom_outs')]:
+        print(label, next_action_logits(outs).squeeze()[:2].detach().tolist())
+patch_layers([1])
+# %%
+# show attn pattern of L1H0
+print('Top cache')
+fig = make_subplots(rows=1, cols=2, subplot_titles=("Top cache", "Bottom cache"))
+fig.add_trace(
+    go.Heatmap(
+        z=top_cache['pattern', 1][0, 0].detach().cpu().numpy(),
+        showscale=False,
+        colorscale='Blues',
+    ),
+    row=1, col=1,
+)
+fig.add_trace(
+    go.Heatmap(
+        z=bottom_cache['pattern', 1][0, 0].detach().cpu().numpy(),
+        showscale=False,
+        colorscale='Blues',
+    ),
+    row=1, col=2,
+)
+fig.show()
 # %%
